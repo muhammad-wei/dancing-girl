@@ -843,10 +843,6 @@ button:focus-visible,
     box-shadow: 0 6px 16px rgba(255, 64, 129, 0.4);
 }
 
-.volume-btn {
-    font-size: 1rem;
-}
-
 /* Music visualization container */
 .music-visualization {
     position: relative;

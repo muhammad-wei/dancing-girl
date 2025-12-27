@@ -27,7 +27,6 @@ class JazzDancer {
         this.vinylRecord = document.getElementById('vinylRecord');
         this.tonearm = document.getElementById('tonearm');
         this.playerPlayBtn = document.getElementById('playerPlayBtn');
-        this.volumeBtn = document.getElementById('volumeBtn');
         this.progressBar = document.getElementById('progressBar');
         this.progressFill = document.getElementById('progressFill');
         this.currentTimeEl = document.getElementById('currentTime');
@@ -40,7 +39,6 @@ class JazzDancer {
         this.audio = new Audio('assets/music/Nick Cave & The Bad Seeds - O Children (Official Audio).mp3');
         this.audio.loop = true;
         this.audio.volume = 0.7;
-        this.lastNonZeroVolume = this.audio.volume;
         this.audio.crossOrigin = "anonymous";
         this.audio.preload = 'metadata';
         
@@ -191,9 +189,6 @@ class JazzDancer {
         
         // Vinyl player events
         this.playerPlayBtn.addEventListener('click', () => this.toggleMusic());
-        if (this.volumeBtn) {
-            this.volumeBtn.addEventListener('click', () => this.toggleMute());
-        }
         this.progressBar.addEventListener('click', (e) => this.seekAudio(e));
         this.progressBar.addEventListener('keydown', (e) => this.handleProgressKey(e));
         this.progressBar.addEventListener('pointerdown', (e) => this.startSeek(e));
@@ -246,9 +241,6 @@ class JazzDancer {
         const t = this.translations[this.currentLang];
         this.playerPlayBtn.textContent = '⏸';
         this.playerPlayBtn.setAttribute('aria-pressed', 'true');
-        if (this.volumeBtn) {
-            this.volumeBtn.setAttribute('aria-pressed', String(this.audio.muted));
-        }
         if (!this.prefersReducedMotion) {
             this.startBrickEffect();
             this.startVinylAnimation();
@@ -346,7 +338,6 @@ class JazzDancer {
         const t = this.translations[this.currentLang];
         this.stopDance({ silent: true });
         this.stopMusic({ silent: true });
-        this.setMuted(false);
         this.playerPlayBtn.textContent = '▶';
         this.playerPlayBtn.setAttribute('aria-pressed', 'false');
         this.hideVinylPlayer();
@@ -362,34 +353,6 @@ class JazzDancer {
         this.updateStartOverlay();
     }
 
-    toggleMute() {
-        this.setMuted(!this.audio.muted);
-    }
-
-    setMuted(muted) {
-        this.audio.muted = Boolean(muted);
-
-        if (this.audio.muted) {
-            // Remember last non-zero volume so we can restore it later.
-            if (this.audio.volume > 0) {
-                this.lastNonZeroVolume = this.audio.volume;
-            }
-            if (this.volumeBtn) {
-                this.volumeBtn.textContent = '🔇';
-                this.volumeBtn.setAttribute('aria-pressed', 'true');
-            }
-            return;
-        }
-
-        if (!this.audio.volume || this.audio.volume === 0) {
-            this.audio.volume = this.lastNonZeroVolume || 0.7;
-        }
-        if (this.volumeBtn) {
-            this.volumeBtn.textContent = '🔊';
-            this.volumeBtn.setAttribute('aria-pressed', 'false');
-        }
-    }
-    
     createParticles() {
         // Create initial ambient particles
         if (this.prefersReducedMotion || this.particleInterval) return;
