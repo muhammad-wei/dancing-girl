@@ -1,0 +1,16 @@
+{
+    "name": "Jazz Dancer - Alive in Motion",
+    "short_name": "Jazz Dancer",
+    "start_url": "./index.html",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#ff4081",
+    "icons": [
+        {
+            "src": "assets/img/dancing/her.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        }
+    ]
+}

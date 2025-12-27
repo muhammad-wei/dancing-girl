@@ -8,10 +8,11 @@ An interactive, music-driven ASCII dance experience. A vinyl-inspired player, sy
 - Music-reactive brick visualizer powered by the Web Audio API
 - Bilingual interface (English/中文) with rotating dance quotes
 - Keyboard shortcuts plus click-to-trigger special moves on the ASCII dancer
+- Offline-friendly shell caching via a service worker
 
 ## Quickstart
 1) From the project root, start a simple server (needed for loading ASCII frames): `python3 -m http.server 8000`
-2) Open `http://localhost:8000/dancing-girl.html` in a modern browser
+2) Open `http://localhost:8000/index.html` in a modern browser
 3) Click **Dancing** to start the animation (music auto-starts); use **Reset** to return to the initial state
 
 ## Controls
@@ -20,11 +21,12 @@ An interactive, music-driven ASCII dance experience. A vinyl-inspired player, sy
 - Vinyl controls: play/pause, mute toggle, click the progress bar to seek
 - ASCII area: click the dancer for a special move
 - Language switch: toggle English/中文 copy
-- Keyboard: space = toggle dance, `m` = music on/off, `r` = reset
+- Keyboard: space = start/stop dance + music, `m` = music on/off, `r` = reset
 
 ## Customization
 - Swap the track by replacing `assets/music/Nick Cave & The Bad Seeds - O Children (Official Audio).mp3` or by updating the audio source near the top of `assets/js/dancing.js`.
 - Add or modify ASCII frames under `assets/img/dancing/dancing_ascii/`; fallback frames are embedded in `dancing.js` for immediate playback.
+- Regenerate the packed ASCII bundle with `python3 scripts/build_ascii_frames.py` after updating frame files.
 - Tweak visuals in `assets/css/dancing.css` (e.g., colors, gradients, grid layout, animations).
 
 ## Project Structure

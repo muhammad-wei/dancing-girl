@@ -6,6 +6,10 @@ class JazzDancer {
         this.musicBricks = document.getElementById('musicBricks');
         this.langSwitch = document.getElementById('langSwitch');
         this.currentLang = 'en';
+        this.prefersReducedMotion = window.matchMedia
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        this.wasMusicPlayingBeforeHidden = false;
+        this.wasDancingBeforeHidden = false;
         
         // ASCII dancer elements
         this.asciiDisplay = document.getElementById('asciiDisplay');
@@ -13,6 +17,10 @@ class JazzDancer {
         this.asciiCurrentFrame = 0;
         this.asciiAnimationId = null;
         this.isAsciiDancing = false;
+        this.asciiFrameDelay = 33;
+        this.asciiLastFrameTime = 0;
+        this.asciiTotalFrames = 601;
+        this.asciiIdleLoadId = null;
         
         // Vinyl player elements
         this.vinylPlayer = document.getElementById('vinylPlayer');
@@ -24,6 +32,9 @@ class JazzDancer {
         this.progressFill = document.getElementById('progressFill');
         this.currentTimeEl = document.getElementById('currentTime');
         this.totalTimeEl = document.getElementById('totalTime');
+        this.progressHandle = this.progressBar.querySelector('.progress-handle');
+        this.statusEl = document.getElementById('statusMessage');
+        this.startOverlay = document.getElementById('startOverlay');
         
         // Initialize audio element with Web Audio API for visualization
         this.audio = new Audio('assets/music/Nick Cave & The Bad Seeds - O Children (Official Audio).mp3');
@@ -110,14 +121,19 @@ class JazzDancer {
         
         this.isDancing = false;
         this.isMusicPlaying = false;
-        this.currentAnimation = null;
         this.particleInterval = null;
+        this.isSeeking = false;
+        this.seekPointerId = null;
+        this.pendingSeekRatio = null;
+        this.handleSeekMove = (event) => this.onSeekMove(event);
+        this.handleSeekEnd = (event) => this.stopSeek(event);
         
         this.init();
     }
     
     init() {
         this.bindEvents();
+        this.observeVisibility();
         this.createParticles();
         this.initBricks();
         this.initLangSwitch();
@@ -130,19 +146,43 @@ class JazzDancer {
     setupAudioAnalysis() {
         // Initialize Web Audio API when user first interacts
         document.addEventListener('click', () => {
-            if (!this.audioContext) {
-                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                this.analyser = this.audioContext.createAnalyser();
-                this.analyser.fftSize = 64; // Small FFT size for 32 frequency bins
-                this.analyser.smoothingTimeConstant = 0.8;
-                
-                this.source = this.audioContext.createMediaElementSource(this.audio);
-                this.source.connect(this.analyser);
-                this.analyser.connect(this.audioContext.destination);
-                
-                this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-            }
+            this.ensureAudioContext();
+            this.resumeAudioContext();
         }, { once: true });
+    }
+
+    ensureAudioContext() {
+        if (this.audioContext) return;
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        this.analyser = this.audioContext.createAnalyser();
+        this.analyser.fftSize = 64; // Small FFT size for 32 frequency bins
+        this.analyser.smoothingTimeConstant = 0.8;
+
+        this.source = this.audioContext.createMediaElementSource(this.audio);
+        this.source.connect(this.analyser);
+        this.analyser.connect(this.audioContext.destination);
+
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    }
+
+    resumeAudioContext() {
+        if (!this.audioContext || this.audioContext.state !== 'suspended') return;
+        this.audioContext.resume().catch(() => {});
+    }
+
+    observeVisibility() {
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                this.wasMusicPlayingBeforeHidden = this.isMusicPlaying;
+                this.wasDancingBeforeHidden = this.isDancing;
+                if (this.isMusicPlaying) this.stopMusic({ silent: true });
+                if (this.isDancing) this.stopDance({ silent: true });
+                return;
+            }
+
+            if (this.wasMusicPlayingBeforeHidden) this.startMusic({ silent: true });
+            if (this.wasDancingBeforeHidden) this.startDance({ silent: true });
+        });
     }
     
     bindEvents() {
@@ -155,6 +195,10 @@ class JazzDancer {
             this.volumeBtn.addEventListener('click', () => this.toggleMute());
         }
         this.progressBar.addEventListener('click', (e) => this.seekAudio(e));
+        this.progressBar.addEventListener('keydown', (e) => this.handleProgressKey(e));
+        this.progressBar.addEventListener('pointerdown', (e) => this.startSeek(e));
+        this.progressBar.addEventListener('mousedown', (e) => this.startSeek(e));
+        this.progressBar.addEventListener('touchstart', (e) => this.startSeek(e), { passive: false });
         
         // Audio events for progress tracking
         this.audio.addEventListener('loadedmetadata', () => this.updateDuration());
@@ -162,10 +206,17 @@ class JazzDancer {
         
         // Add keyboard controls
         document.addEventListener('keydown', (e) => {
+            const target = e.target;
+            const isEditable = target && target.isContentEditable;
+            const isInteractive = target && target.closest
+                ? target.closest('button, input, textarea, select, [role="slider"]')
+                : false;
+            if (isEditable || isInteractive) return;
+
             switch(e.key) {
                 case ' ':
                     e.preventDefault();
-                    this.toggleDance();
+                    this.toggleShow();
                     break;
                 case 'm':
                     this.toggleMusic();
@@ -181,31 +232,52 @@ class JazzDancer {
             this.performSpecialMove();
         });
     }
-    
+
     toggleMusic() {
-        this.isMusicPlaying = !this.isMusicPlaying;
-        const t = this.translations[this.currentLang];
         if (this.isMusicPlaying) {
-            this.playerPlayBtn.textContent = '⏸';
-            this.startBrickEffect();
-            this.showVinylPlayer();
-            this.showMusicVisualization();
-            this.startVinylAnimation();
-            this.showMessage(t.musicMsg);
-            // Play the audio
-            this.audio.play().catch(e => {
-                console.log('Audio play failed:', e);
-                this.showMessage('Click to enable audio');
-            });
-        } else {
-            this.playerPlayBtn.textContent = '▶';
-            this.stopBrickEffect();
-            this.stopVinylAnimation();
-            this.hideMusicVisualization();
-            this.showMessage(t.musicPaused);
-            // Pause the audio
-            this.audio.pause();
+            this.stopMusic();
+            return;
         }
+        this.startMusic();
+    }
+
+    startMusic({ silent = false } = {}) {
+        this.isMusicPlaying = true;
+        const t = this.translations[this.currentLang];
+        this.playerPlayBtn.textContent = '⏸';
+        this.playerPlayBtn.setAttribute('aria-pressed', 'true');
+        if (this.volumeBtn) {
+            this.volumeBtn.setAttribute('aria-pressed', String(this.audio.muted));
+        }
+        if (!this.prefersReducedMotion) {
+            this.startBrickEffect();
+            this.startVinylAnimation();
+        }
+        this.showVinylPlayer();
+        this.showMusicVisualization();
+        if (!silent) this.showMessage(t.musicMsg);
+        this.ensureAudioContext();
+        this.resumeAudioContext();
+        // Play the audio
+        this.audio.play().catch(e => {
+            console.log('Audio play failed:', e);
+            if (!silent) this.showMessage('Click to enable audio');
+        });
+        this.updateStartOverlay();
+    }
+
+    stopMusic({ silent = false } = {}) {
+        this.isMusicPlaying = false;
+        const t = this.translations[this.currentLang];
+        this.playerPlayBtn.textContent = '▶';
+        this.playerPlayBtn.setAttribute('aria-pressed', 'false');
+        this.stopBrickEffect();
+        this.stopVinylAnimation();
+        this.hideMusicVisualization();
+        if (!silent) this.showMessage(t.musicPaused);
+        // Pause the audio
+        this.audio.pause();
+        this.updateStartOverlay();
     }
 
     toggleShow() {
@@ -213,52 +285,52 @@ class JazzDancer {
         // Rule: when dance is off, clicking starts dance and ensures music is playing.
         // When dance is on, clicking stops dance and pauses music.
         if (this.isDancing) {
-            this.toggleDance();
-            if (this.isMusicPlaying) {
-                this.toggleMusic();
-            }
+            this.stopDance();
+            if (this.isMusicPlaying) this.stopMusic();
             return;
         }
 
-        if (!this.isMusicPlaying) {
-            this.toggleMusic();
-        }
-        this.toggleDance();
+        if (!this.isMusicPlaying) this.startMusic();
+        this.startDance();
     }
     
     toggleDance() {
-        this.isDancing = !this.isDancing;
-        const t = this.translations[this.currentLang];
         if (this.isDancing) {
-            this.showBtn.textContent = t.stop;
-            this.showBtn.classList.add('active');
-            this.startDanceSequence();
-            this.showMessage(t.danceMsg);
-            this.startAsciiDance();
-        } else {
-            this.showBtn.textContent = t.start;
-            this.showBtn.classList.remove('active');
             this.stopDance();
-            this.showMessage(t.danceStopped);
-            this.stopAsciiDance();
+            return;
         }
+        this.startDance();
     }
-    
-    startDanceSequence() {
-        // For ASCII dancer, the animation is handled in startAsciiDance
-        // This method is kept for compatibility but doesn't need to do anything
+
+    startDance({ silent = false } = {}) {
+        this.isDancing = true;
+        const t = this.translations[this.currentLang];
+        this.showBtn.textContent = t.stop;
+        this.showBtn.classList.add('active');
+        this.showBtn.setAttribute('aria-pressed', 'true');
+        if (!silent) this.showMessage(t.danceMsg);
+        this.startAsciiDance();
+        this.updateStartOverlay();
     }
-    
-    stopDance() {
-        if (this.currentAnimation) {
-            clearInterval(this.currentAnimation);
-            this.currentAnimation = null;
-        }
+
+    stopDance({ silent = false } = {}) {
+        this.isDancing = false;
+        const t = this.translations[this.currentLang];
+        this.showBtn.textContent = t.start;
+        this.showBtn.classList.remove('active');
+        this.showBtn.setAttribute('aria-pressed', 'false');
+        if (!silent) this.showMessage(t.danceStopped);
+        this.stopAsciiDance();
+        this.updateStartOverlay();
     }
     
     performSpecialMove() {
         const t = this.translations[this.currentLang];
         if (this.isDancing) {
+            if (this.prefersReducedMotion) {
+                this.showMessage(t.specialMove);
+                return;
+            }
             // Create special effect for ASCII dancer
             this.asciiDisplay.style.animation = 'ascii-special-glow 0.8s ease-in-out';
             setTimeout(() => {
@@ -271,25 +343,23 @@ class JazzDancer {
     }
     
     reset() {
-        this.isDancing = false;
-        this.isMusicPlaying = false;
         const t = this.translations[this.currentLang];
-        this.playerPlayBtn.textContent = '▶';
+        this.stopDance({ silent: true });
+        this.stopMusic({ silent: true });
         this.setMuted(false);
-        this.showBtn.textContent = t.start;
-        this.showBtn.classList.remove('active');
-        this.stopDance();
-        this.stopAsciiDance();
-        this.stopBrickEffect();
-        this.stopVinylAnimation();
+        this.playerPlayBtn.textContent = '▶';
+        this.playerPlayBtn.setAttribute('aria-pressed', 'false');
         this.hideVinylPlayer();
         this.hideMusicVisualization();
         this.showMessage(t.resetMsg);
         // Stop and reset audio
         this.audio.pause();
         this.audio.currentTime = 0;
-        this.progressFill.style.width = '0%';
+        this.setProgressRatio(0);
         this.currentTimeEl.textContent = '0:00';
+        this.progressBar.setAttribute('aria-valuenow', '0');
+        this.progressBar.setAttribute('aria-valuetext', '0:00 of 0:00');
+        this.updateStartOverlay();
     }
 
     toggleMute() {
@@ -304,19 +374,26 @@ class JazzDancer {
             if (this.audio.volume > 0) {
                 this.lastNonZeroVolume = this.audio.volume;
             }
-            if (this.volumeBtn) this.volumeBtn.textContent = '🔇';
+            if (this.volumeBtn) {
+                this.volumeBtn.textContent = '🔇';
+                this.volumeBtn.setAttribute('aria-pressed', 'true');
+            }
             return;
         }
 
         if (!this.audio.volume || this.audio.volume === 0) {
             this.audio.volume = this.lastNonZeroVolume || 0.7;
         }
-        if (this.volumeBtn) this.volumeBtn.textContent = '🔊';
+        if (this.volumeBtn) {
+            this.volumeBtn.textContent = '🔊';
+            this.volumeBtn.setAttribute('aria-pressed', 'false');
+        }
     }
     
     createParticles() {
         // Create initial ambient particles
-        setInterval(() => {
+        if (this.prefersReducedMotion || this.particleInterval) return;
+        this.particleInterval = setInterval(() => {
             if (this.isMusicPlaying) {
                 this.createParticle();
             }
@@ -328,7 +405,6 @@ class JazzDancer {
         particle.className = 'particle';
         
         const x = Math.random() * this.container.offsetWidth;
-        const y = this.container.offsetHeight;
         
         particle.style.left = x + 'px';
         particle.style.bottom = '0px';
@@ -343,6 +419,7 @@ class JazzDancer {
     }
     
     createSpecialParticles() {
+        if (this.prefersReducedMotion) return;
         for (let i = 0; i < 10; i++) {
             setTimeout(() => {
                 this.createParticle();
@@ -351,6 +428,7 @@ class JazzDancer {
     }
     
     startBrickEffect() {
+        if (this.prefersReducedMotion) return;
         if (this.brickRAF) return;
 
         const animate = () => {
@@ -452,15 +530,22 @@ class JazzDancer {
     
     applyLanguage() {
         const t = this.translations[this.currentLang];
+        const nextLangLabel = this.currentLang === 'en' ? 'Switch to Chinese' : 'Switch to English';
         
         // Reset quote index when language changes to avoid array bounds issues
         this.quoteIndex = 0;
         
+        document.documentElement.lang = this.currentLang === 'en' ? 'en' : 'zh-Hans';
         document.querySelector('#mainTitle .title-text').textContent = t.title;
         document.getElementById('mainSubtitle').textContent = t.subtitle;
-        document.getElementById('showBtn').textContent = this.isDancing ? t.stop : t.start;
-        document.getElementById('resetBtn').textContent = t.reset;
-        document.getElementById('langSwitch').textContent = t.langBtn;
+        this.showBtn.textContent = this.isDancing ? t.stop : t.start;
+        this.resetBtn.textContent = t.reset;
+        this.langSwitch.textContent = t.langBtn;
+        this.langSwitch.setAttribute('aria-label', nextLangLabel);
+        this.langSwitch.setAttribute(
+            'aria-pressed',
+            this.currentLang === 'cn' ? 'true' : 'false'
+        );
         document.querySelector('.quote').textContent = t.quotes[this.quoteIndex];
         document.querySelector('.quote-author').textContent = t.authors[this.quoteIndex];
         document.querySelector('.footer p').textContent = t.footer;
@@ -479,24 +564,13 @@ class JazzDancer {
     }
     
     showMessage(text) {
+        if (this.statusEl) {
+            this.statusEl.textContent = text;
+        }
         // Create a temporary message element
         const message = document.createElement('div');
+        message.className = 'toast-message';
         message.textContent = text;
-        message.style.cssText = `
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #1a1a1a;
-            color: white;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-family: 'Inter', sans-serif;
-            font-size: 0.9rem;
-            z-index: 1000;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        `;
         
         document.body.appendChild(message);
         
@@ -515,18 +589,28 @@ class JazzDancer {
             }, 300);
         }, 2000);
     }
+
+    updateStartOverlay() {
+        if (!this.startOverlay) return;
+        const shouldShow = !this.isDancing && !this.isMusicPlaying;
+        this.startOverlay.classList.toggle('visible', shouldShow);
+        this.startOverlay.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+    }
     
     // Vinyl Player Methods
     initVinylPlayer() {
         this.vinylPlayer.style.display = 'block';
+        this.vinylPlayer.setAttribute('aria-hidden', 'true');
     }
     
     showVinylPlayer() {
         this.vinylPlayer.classList.add('active');
+        this.vinylPlayer.setAttribute('aria-hidden', 'false');
     }
     
     hideVinylPlayer() {
         this.vinylPlayer.classList.remove('active');
+        this.vinylPlayer.setAttribute('aria-hidden', 'true');
     }
     
     showMusicVisualization() {
@@ -554,22 +638,161 @@ class JazzDancer {
     }
     
     updateProgress() {
-        const progress = (this.audio.currentTime / this.audio.duration) * 100;
-        this.progressFill.style.width = progress + '%';
+        if (!this.canSeek()) return;
+        const ratio = this.audio.currentTime / this.audio.duration;
+        this.setProgressRatio(ratio);
         this.currentTimeEl.textContent = this.formatTime(this.audio.currentTime);
+        this.progressBar.setAttribute('aria-valuenow', Math.floor(this.audio.currentTime));
+        this.progressBar.setAttribute(
+            'aria-valuetext',
+            `${this.formatTime(this.audio.currentTime)} of ${this.formatTime(this.audio.duration)}`
+        );
     }
     
     updateDuration() {
+        if (!this.canSeek()) return;
         this.totalTimeEl.textContent = this.formatTime(this.audio.duration);
+        this.progressBar.setAttribute('aria-valuemax', Math.floor(this.audio.duration));
+        this.progressBar.setAttribute(
+            'aria-valuetext',
+            `${this.formatTime(this.audio.currentTime)} of ${this.formatTime(this.audio.duration)}`
+        );
+        if (this.pendingSeekRatio !== null) {
+            this.audio.currentTime = this.pendingSeekRatio * this.audio.duration;
+            this.pendingSeekRatio = null;
+            this.updateProgress();
+        }
     }
     
     seekAudio(e) {
+        if (!this.canSeek()) return;
+        this.updateSeekFromPointer(e);
+    }
+
+    handleProgressKey(e) {
+        if (!this.canSeek()) return;
+        if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            this.seekBy(-5);
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            this.seekBy(5);
+        } else if (e.key === 'Home') {
+            e.preventDefault();
+            this.audio.currentTime = 0;
+            this.updateProgress();
+        } else if (e.key === 'End') {
+            e.preventDefault();
+            this.audio.currentTime = this.audio.duration;
+            this.updateProgress();
+        }
+    }
+
+    seekBy(deltaSeconds) {
+        const nextTime = Math.min(
+            Math.max(this.audio.currentTime + deltaSeconds, 0),
+            this.audio.duration
+        );
+        this.audio.currentTime = nextTime;
+        this.updateProgress();
+    }
+
+    startSeek(e) {
+        if (!this.canSeek()) return;
+        if (this.isSeeking) return;
+        if (e.type === 'pointerdown' && e.button && e.button !== 0) return;
+        if (e.type === 'mousedown' && e.button !== 0) return;
+        e.preventDefault();
+        this.isSeeking = true;
+        this.progressBar.classList.add('dragging');
+
+        if (e.type === 'pointerdown') {
+            this.seekPointerId = e.pointerId;
+            if (this.progressBar.setPointerCapture) {
+                this.progressBar.setPointerCapture(e.pointerId);
+            }
+            window.addEventListener('pointermove', this.handleSeekMove);
+            window.addEventListener('pointerup', this.handleSeekEnd);
+            window.addEventListener('pointercancel', this.handleSeekEnd);
+        } else if (e.type === 'mousedown') {
+            window.addEventListener('mousemove', this.handleSeekMove);
+            window.addEventListener('mouseup', this.handleSeekEnd);
+        } else if (e.type === 'touchstart') {
+            window.addEventListener('touchmove', this.handleSeekMove, { passive: false });
+            window.addEventListener('touchend', this.handleSeekEnd);
+            window.addEventListener('touchcancel', this.handleSeekEnd);
+        }
+
+        this.updateSeekFromPointer(e);
+    }
+
+    onSeekMove(e) {
+        if (!this.isSeeking) return;
+        if (e.type.startsWith('pointer')) {
+            if (this.seekPointerId !== null && e.pointerId !== this.seekPointerId) return;
+        }
+        if (e.type.startsWith('touch')) e.preventDefault();
+        this.updateSeekFromPointer(e);
+    }
+
+    stopSeek(e) {
+        if (!this.isSeeking) return;
+        if (e.type && e.type.startsWith('pointer')) {
+            if (this.seekPointerId !== null && e.pointerId !== this.seekPointerId) return;
+        }
+        this.isSeeking = false;
+        this.progressBar.classList.remove('dragging');
+        if (this.progressBar.releasePointerCapture) {
+            try {
+                this.progressBar.releasePointerCapture(this.seekPointerId);
+            } catch (error) {}
+        }
+        this.seekPointerId = null;
+        window.removeEventListener('pointermove', this.handleSeekMove);
+        window.removeEventListener('pointerup', this.handleSeekEnd);
+        window.removeEventListener('pointercancel', this.handleSeekEnd);
+        window.removeEventListener('mousemove', this.handleSeekMove);
+        window.removeEventListener('mouseup', this.handleSeekEnd);
+        window.removeEventListener('touchmove', this.handleSeekMove);
+        window.removeEventListener('touchend', this.handleSeekEnd);
+        window.removeEventListener('touchcancel', this.handleSeekEnd);
+    }
+
+    updateSeekFromPointer(e) {
+        if (!this.canSeek()) return;
         const rect = this.progressBar.getBoundingClientRect();
-        const pos = (e.clientX - rect.left) / rect.width;
-        this.audio.currentTime = pos * this.audio.duration;
+        const clientX = this.getEventClientX(e);
+        if (!Number.isFinite(clientX)) return;
+        const clampedX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+        const ratio = rect.width ? clampedX / rect.width : 0;
+        if (!this.canSeek()) {
+            this.pendingSeekRatio = ratio;
+            this.setProgressRatio(ratio);
+            return;
+        }
+        this.audio.currentTime = ratio * this.audio.duration;
+        this.updateProgress();
+    }
+
+    getEventClientX(e) {
+        if (e.touches && e.touches.length) return e.touches[0].clientX;
+        if (e.changedTouches && e.changedTouches.length) return e.changedTouches[0].clientX;
+        return e.clientX;
+    }
+
+    setProgressRatio(ratio) {
+        const clamped = Math.min(Math.max(ratio, 0), 1);
+        const percent = clamped * 100;
+        this.progressFill.style.width = `${percent}%`;
+        this.progressBar.style.setProperty('--progress', `${percent}%`);
+    }
+
+    canSeek() {
+        return Number.isFinite(this.audio.duration) && this.audio.duration > 0;
     }
     
     formatTime(seconds) {
+        if (!Number.isFinite(seconds)) return '0:00';
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
         return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -579,89 +802,109 @@ class JazzDancer {
     async loadAsciiFrames() {
         // Load ASCII frames from the dancing_ascii directory
         this.asciiFrames = [];
-        
+
         // Show large, visible loading message
-        this.showLoadingMessage("Loading ASCII dancer... 🎭");
-        
+        this.showLoadingMessage('Loading ASCII dancer...');
+
         // Add immediate fallback frames for mobile devices
         const fallbackFrames = this.getFallbackFrames();
-        
+
         try {
-            // Load all 600 frames for both mobile and desktop
-            const maxFrames = 600; // Same for all devices
-            const batchSize = 100; // 改为每100个一批加载
-            
-            console.log(`Loading ${maxFrames} frames for all devices`);
-            
-            // Load frames in batches
-            for (let batch = 0; batch < Math.ceil(maxFrames / batchSize); batch++) {
-                const promises = [];
-                const start = batch * batchSize + 1;
-                const end = Math.min(start + batchSize - 1, maxFrames);
-                
-                for (let i = start; i <= end; i++) {
-                    const frameNumber = i.toString().padStart(4, '0');
-                    promises.push(
-                        fetch(`assets/img/dancing/dancing_ascii/dancing_${frameNumber}.txt`, {
-                            cache: 'force-cache' // Use cache for all devices
-                        })
-                        .then(response => {
-                            if (response.ok) {
-                                return response.text().then(content => ({ index: i - 1, content }));
-                            }
-                            throw new Error(`HTTP ${response.status}`);
-                        })
-                        .catch(error => {
-                            console.warn(`Frame ${frameNumber} failed:`, error.message);
-                            return null;
-                        })
-                    );
-                }
-                
-                const results = await Promise.allSettled(promises);
-                const loadedFrames = results
-                    .filter(result => result.status === 'fulfilled' && result.value)
-                    .map(result => result.value);
-                
-                // Add loaded frames in order
-                loadedFrames.forEach(frame => {
-                    this.asciiFrames[frame.index] = frame.content;
-                });
-                
-                // Show progress for all devices with large, visible text
-                if (this.asciiFrames.length > 0) {
-                    this.showLoadingMessage(`Loading... ${this.asciiFrames.length}/${maxFrames} frames`);
-                }
-                
-                // Small delay between batches for all devices
-                if (batch < Math.ceil(maxFrames / batchSize) - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 50));
-                }
+            const packedFrames = await this.loadPackedFrames();
+            if (packedFrames && packedFrames.length) {
+                console.log(`Loaded ${packedFrames.length} packed ASCII frames`);
+                this.asciiFrames = packedFrames;
+                this.finishAsciiLoad();
+                return;
             }
-            
-            // Filter out undefined entries and ensure we have frames
-            this.asciiFrames = this.asciiFrames.filter(frame => frame);
-            
-            console.log(`Successfully loaded ${this.asciiFrames.length} ASCII frames`);
-            
-            // If we couldn't load enough frames, use fallback
-            if (this.asciiFrames.length < 10) {
+
+            const initialBatch = 30;
+            const batchSize = 60;
+            console.log(`Loading ${this.asciiTotalFrames} frames (initial ${initialBatch})`);
+
+            const firstFrames = await this.loadFrameBatch(1, initialBatch);
+            if (firstFrames.length < 5) {
                 console.warn('Too few frames loaded, using fallback animation');
                 this.asciiFrames = fallbackFrames;
+                this.finishAsciiLoad();
+                return;
             }
-            
-            // Show first frame as preview
-            if (this.asciiFrames.length > 0) {
-                this.clearLoadingMessage();
-                this.asciiDisplay.textContent = this.asciiFrames[0];
-            }
+
+            this.asciiFrames = firstFrames;
+            this.finishAsciiLoad();
+            this.scheduleIdleFrameLoad(initialBatch + 1, batchSize);
         } catch (error) {
             console.error('Error loading ASCII frames:', error);
-            // Use fallback frames
             this.asciiFrames = fallbackFrames;
-            this.clearLoadingMessage();
-            this.asciiDisplay.textContent = this.asciiFrames[0];
+            this.finishAsciiLoad();
         }
+    }
+
+    async loadPackedFrames() {
+        try {
+            const response = await fetch('assets/img/dancing/dancing_ascii/frames.json', {
+                cache: 'force-cache'
+            });
+            if (!response.ok) return null;
+            const data = await response.json();
+            if (Array.isArray(data)) return data;
+            if (data && Array.isArray(data.frames)) return data.frames;
+        } catch (error) {
+            console.warn('Packed frames unavailable:', error.message);
+        }
+        return null;
+    }
+
+    async loadFrameBatch(start, end) {
+        const promises = [];
+        for (let i = start; i <= end; i++) {
+            const frameNumber = i.toString().padStart(4, '0');
+            promises.push(
+                fetch(`assets/img/dancing/dancing_ascii/dancing_${frameNumber}.txt`, {
+                    cache: 'force-cache'
+                })
+                    .then(response => (response.ok ? response.text() : null))
+                    .then(content => (content ? { index: i - 1, content } : null))
+                    .catch(() => null)
+            );
+        }
+
+        const results = await Promise.all(promises);
+        return results
+            .filter(Boolean)
+            .map(result => result.content);
+    }
+
+    scheduleIdleFrameLoad(startFrame, batchSize) {
+        const loadNext = async (start) => {
+            if (start > this.asciiTotalFrames) return;
+            const end = Math.min(start + batchSize - 1, this.asciiTotalFrames);
+            const frames = await this.loadFrameBatch(start, end);
+            if (frames.length) {
+                this.asciiFrames.push(...frames);
+            }
+            const nextStart = end + 1;
+            if (nextStart <= this.asciiTotalFrames) {
+                this.asciiIdleLoadId = this.requestIdleCallback(() => loadNext(nextStart));
+            }
+        };
+
+        this.asciiIdleLoadId = this.requestIdleCallback(() => loadNext(startFrame));
+    }
+
+    requestIdleCallback(callback) {
+        if (typeof window.requestIdleCallback === 'function') {
+            return window.requestIdleCallback(callback, { timeout: 1000 });
+        }
+        return window.setTimeout(callback, 50);
+    }
+
+    finishAsciiLoad() {
+        if (this.asciiFrames.length === 0) return;
+        this.clearLoadingMessage();
+        this.asciiCurrentFrame = 0;
+        this.asciiDisplay.textContent = this.asciiFrames[0];
+        this.updateStartOverlay();
     }
     
     showLoadingMessage(text) {
@@ -777,19 +1020,24 @@ class JazzDancer {
         this.clearLoadingMessage();
         
         this.isAsciiDancing = true;
-        this.asciiDisplay.classList.add('dancing');
-        
-        // Same animation speed for all devices
-        const frameDelay = this.isMusicPlaying ? 30 : 30; // Same speed when music plays
-        
-        console.log(`Starting ASCII dance with ${this.asciiFrames.length} frames, delay: ${frameDelay}ms`);
-        
-        this.asciiAnimationId = setInterval(() => {
-            if (this.asciiCurrentFrame < this.asciiFrames.length) {
+        if (!this.prefersReducedMotion) this.asciiDisplay.classList.add('dancing');
+
+        this.asciiFrameDelay = this.prefersReducedMotion ? 120 : 33;
+        this.asciiLastFrameTime = performance.now();
+
+        console.log(`Starting ASCII dance with ${this.asciiFrames.length} frames, delay: ${this.asciiFrameDelay}ms`);
+
+        const animate = (now) => {
+            if (!this.isAsciiDancing) return;
+            if (now - this.asciiLastFrameTime >= this.asciiFrameDelay) {
                 this.asciiDisplay.textContent = this.asciiFrames[this.asciiCurrentFrame];
                 this.asciiCurrentFrame = (this.asciiCurrentFrame + 1) % this.asciiFrames.length;
+                this.asciiLastFrameTime = now;
             }
-        }, frameDelay);
+            this.asciiAnimationId = requestAnimationFrame(animate);
+        };
+
+        this.asciiAnimationId = requestAnimationFrame(animate);
     }
     
     stopAsciiDance() {
@@ -797,7 +1045,7 @@ class JazzDancer {
         this.asciiDisplay.classList.remove('dancing');
         
         if (this.asciiAnimationId) {
-            clearInterval(this.asciiAnimationId);
+            cancelAnimationFrame(this.asciiAnimationId);
             this.asciiAnimationId = null;
         }
         
